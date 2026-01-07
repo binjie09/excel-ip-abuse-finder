@@ -4,7 +4,9 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
-const { processExcel } = require('./services/excelProcessor');
+const fs = require('fs');
+const { processExcelAsync } = require('./services/excelProcessor');
+const Job = require('./models/Job');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,30 +19,61 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/ip-abuse-fi
 app.use(cors());
 app.use(express.json());
 
-// Serve static files from React app (for production docker)
+// Serve static files from React app
 app.use(express.static(path.join(__dirname, '../client/dist')));
 
 // File upload setup
 const upload = multer({ dest: 'uploads/' });
 
+// 1. Upload & Create Job
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: '请上传文件' });
     }
 
     try {
-        const enrichedBuffer = await processExcel(req.file.path);
+        const job = await Job.create({
+            originalFilename: req.file.originalname,
+            status: 'pending'
+        });
 
-        res.setHeader('Content-Disposition', `attachment; filename="processed_${req.file.originalname}"`);
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.send(enrichedBuffer);
+        // Start processing asynchronously
+        processExcelAsync(job._id, req.file.path);
+
+        res.json({ jobId: job._id });
     } catch (error) {
-        console.error('Processing error:', error);
-        res.status(500).json({ error: '文件处理失败: ' + error.message });
+        console.error('Job creation error:', error);
+        res.status(500).json({ error: '创建任务失败' });
     }
 });
 
-// Fallback to React index.html for any other route
+// 2. Poll Job Status
+app.get('/api/job/:id', async (req, res) => {
+    try {
+        const job = await Job.findById(req.params.id);
+        if (!job) return res.status(404).json({ error: '任务不存在' });
+        res.json(job);
+    } catch (error) {
+        res.status(500).json({ error: '查询失败' });
+    }
+});
+
+// 3. Download Result
+app.get('/api/download/:id', async (req, res) => {
+    try {
+        const job = await Job.findById(req.params.id);
+        if (!job || job.status !== 'completed' || !job.resultPath) {
+            return res.status(404).json({ error: '文件未就绪或任务失败' });
+        }
+
+        const filename = `processed_${job.originalFilename}`;
+        res.download(job.resultPath, filename);
+    } catch (error) {
+        res.status(500).json({ error: '下载失败' });
+    }
+});
+
+// Fallback route
 app.get(/(.*)/, (req, res) => {
     res.sendFile(path.join(__dirname, '../client/dist/index.html'));
 });

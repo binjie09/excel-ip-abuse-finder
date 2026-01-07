@@ -1,6 +1,7 @@
 const xlsx = require('xlsx');
 const fs = require('fs');
 const { getIpInfo } = require('./apiService');
+const Job = require('../models/Job');
 
 // Helper to flatten object for Excel columns
 function flattenObject(obj, prefix = '', res = {}) {
@@ -48,99 +49,104 @@ function detectIpColumn(ws) {
         }
     }
 
-    // Optional: threshold? if maxScore > 0 return bestCol
     return bestCol >= 0 ? bestCol : null;
 }
 
-async function processExcel(filePath) {
-    const workbook = xlsx.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
+async function processExcelAsync(jobId, filePath) {
+    try {
+        await Job.findByIdAndUpdate(jobId, { status: 'processing', progress: 0 });
 
-    // Convert to JSON (array of arrays to easier handle columns)
-    const rows = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+        const workbook = xlsx.readFile(filePath);
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
 
-    if (rows.length < 2) {
-        throw new Error('Excel文件为空或没有数据');
-    }
+        const rows = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
 
-    const ipColIndex = detectIpColumn(worksheet);
-    if (ipColIndex === null) {
-        throw new Error('在前10行中未自动检测到IP列');
-    }
+        if (rows.length < 2) {
+            throw new Error('Excel文件为空或没有数据');
+        }
 
-    console.log(`Detected IP in column index: ${ipColIndex}`);
+        const ipColIndex = detectIpColumn(worksheet);
+        if (ipColIndex === null) {
+            throw new Error('在前10行中未自动检测到IP列');
+        }
 
-    // Headers
-    const headers = rows[0];
-    // We will append headers later, let's process data rows
+        console.log(`Detected IP in column index: ${ipColIndex}`);
 
-    // Process rows
-    const processedRows = [headers]; // Start with original headers
-    let newHeadersAdded = false;
+        const headers = rows[0];
+        const processedRows = [headers];
+        let newHeadersAdded = false;
 
-    // Limit concurrency to avoid API rate limits? 
-    // ipapi.is might have limits. Let's do batches.
-    const batchSize = 1000;
-    // For demo, standard loop is fine, but Promise.all with simple throttling is better
+        // Process rows
+        // Limit concurrency if needed. For now sequential to be safe with progress updates.
+        const totalRows = rows.length - 1;
 
-    // We process all rows
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
-        const ip = row[ipColIndex];
-        let enrichment = {};
+        for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            const ip = row[ipColIndex];
+            let enrichment = {};
 
-        if (ip) {
-            const ipStr = String(ip).trim();
-            // Basic check before calling API
-            if (/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ipStr)) {
-                const data = await getIpInfo(ipStr);
-                enrichment = flattenObject(data);
+            if (ip) {
+                const ipStr = String(ip).trim();
+                if (/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ipStr)) {
+                    const data = await getIpInfo(ipStr);
+                    enrichment = flattenObject(data);
+                }
+            }
+
+            // Update Headers if needed
+            if (!newHeadersAdded && Object.keys(enrichment).length > 0) {
+                const enrichmentKeys = Object.keys(enrichment);
+                processedRows[0] = [...headers, ...enrichmentKeys];
+                newHeadersAdded = true;
+            }
+
+            const newRow = [...row];
+            if (newHeadersAdded) {
+                const currentHeaders = processedRows[0];
+                for (let k = headers.length; k < currentHeaders.length; k++) {
+                    const key = currentHeaders[k];
+                    newRow[k] = enrichment[key] || '';
+                }
+            }
+            processedRows.push(newRow);
+
+            // Update progress every 10 rows or 10% to save DB writes
+            if (i % 10 === 0 || i === totalRows) {
+                const progress = Math.round((i / totalRows) * 100);
+                await Job.findByIdAndUpdate(jobId, { progress });
             }
         }
 
-        // Add enrichment keys to headers if not yet added
-        if (!newHeadersAdded && Object.keys(enrichment).length > 0) {
-            const enrichmentKeys = Object.keys(enrichment);
-            processedRows[0] = [...headers, ...enrichmentKeys];
-            newHeadersAdded = true;
-        }
+        // Save result
+        const newWs = xlsx.utils.aoa_to_sheet(processedRows);
+        const newWb = xlsx.utils.book_new();
+        xlsx.utils.book_append_sheet(newWb, newWs, "Processed");
 
-        // Make sure row aligns with new headers
-        const newRow = [...row];
-        // If headers expanded, we need to place values in correct slots
-        // Actually simpler: just re-read the keys from the *extended* header 
-        // But rows might have different returned data structure? 
-        // Ideally we normalize headers based on the *first* successful hit or union of all.
-        // For simplicity, we assume the structure is consistent or we take the first one found.
-        // Better strategy: Collect all enriched data first, then compute union of headers, then build table.
-        // But that requires holding everything in memory.
-        // Let's stick to "Extend headers based on first valid response" for MVP.
+        const resultFilename = `processed_${jobId}.xlsx`;
+        const resultPath = `uploads/${resultFilename}`;
+        xlsx.writeFile(newWb, resultPath);
 
-        if (newHeadersAdded) {
-            // Fill in the rest
-            const currentHeaders = processedRows[0];
-            for (let k = headers.length; k < currentHeaders.length; k++) {
-                const key = currentHeaders[k];
-                newRow[k] = enrichment[key] || '';
-            }
-        }
-        processedRows.push(newRow);
+        // Cleanup original upload
+        fs.unlink(filePath, (err) => {
+            if (err) console.error('Cleanup error:', err);
+        });
+
+        await Job.findByIdAndUpdate(jobId, {
+            status: 'completed',
+            progress: 100,
+            resultPath: resultPath
+        });
+
+    } catch (error) {
+        console.error('Job failed:', error);
+        await Job.findByIdAndUpdate(jobId, {
+            status: 'failed',
+            error: error.message
+        });
+        // Cleanup on failure
+        fs.unlink(filePath, () => { });
     }
-
-    // Create new workbook
-    const newWs = xlsx.utils.aoa_to_sheet(processedRows);
-    const newWb = xlsx.utils.book_new();
-    xlsx.utils.book_append_sheet(newWb, newWs, "Processed");
-
-    const buffer = xlsx.write(newWb, { type: 'buffer', bookType: 'xlsx' });
-
-    // Cleanup uploaded file
-    fs.unlink(filePath, (err) => {
-        if (err) console.error('Failed to delete upload:', err);
-    });
-
-    return buffer;
 }
 
-module.exports = { processExcel };
+module.exports = { processExcelAsync };

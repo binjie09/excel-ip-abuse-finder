@@ -161,7 +161,7 @@ function App() {
 
         {/* Footer */}
         <div className="bg-slate-900/50 p-4 text-center text-slate-500 text-sm border-t border-slate-700">
-          Powered by IPAPI.is • Secure Processing
+          Powered by ip2location.io • Secure Processing
         </div>
       </div>
     </div>

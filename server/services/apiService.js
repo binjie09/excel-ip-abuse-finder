@@ -1,7 +1,7 @@
 const axios = require('axios');
 const IpCache = require('../models/IpCache');
 
-const API_KEY = process.env.IPAPI_KEY;
+const API_KEY = process.env.IP2LOCATION_KEY;
 
 async function getIpInfo(ip) {
     // Check cache first
@@ -12,9 +12,9 @@ async function getIpInfo(ip) {
     }
 
     // Fetch from API
-    console.log(`Fetching ${ip} from ipapi.is...`);
+    console.log(`Fetching ${ip} from ip2location.io...`);
     try {
-        const url = `https://api.ipapi.is?q=${ip}&key=${API_KEY}`;
+        const url = `https://api.ip2location.io/?key=${API_KEY}&ip=${ip}`;
         const response = await axios.get(url);
         const data = response.data;
 
@@ -23,7 +23,6 @@ async function getIpInfo(ip) {
         return data;
     } catch (error) {
         console.error(`Error fetching IP ${ip}:`, error.message);
-        // Return partial error object or null, to not break the whole excel process
         return { error: 'Failed to fetch' };
     }
 }

@@ -90,6 +90,26 @@ async function processExcelAsync(jobId, filePath) {
                 const ipStr = String(ip).trim();
                 if (/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(ipStr)) {
                     const data = await getIpInfo(ipStr);
+
+                    // Translate usage_type
+                    if (data.usage_type) {
+                        const usageMap = {
+                            'COM': '商业 (Commercial)',
+                            'DCH': '数据中心 (Data Center/Hosting)',
+                            'ISP': '固定宽带 (Fixed Line ISP)',
+                            'MOB': '移动网络 (Mobile ISP)',
+                            'ISP/MOB': '固定/移动混合 (Fixed/Mobile ISP)',
+                            'ORG': '组织机构 (Organization)',
+                            'RSV': '保留地址 (Reserved)',
+                            'SES': '搜索引擎爬虫 (Search Engine Spider)',
+                            'EDU': '教育机构 (Education)',
+                            'GOV': '政府机构 (Government)',
+                            'MIL': '军事机构 (Military)',
+                            'CDN': '内容分发网络 (CDN)'
+                        };
+                        data.usage_type = usageMap[data.usage_type] || data.usage_type;
+                    }
+
                     enrichment = flattenObject(data);
                 }
             }
